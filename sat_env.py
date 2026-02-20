@@ -45,30 +45,30 @@ class SatEnv(gym.Env):
 
         # --- ACTION SPACE ---
         if self.phase == "thermal_only":
-            # Only compute throttle [0,1] — no thrust needed
+            # [compute_throttle, attitude_theta]
             self.action_space = spaces.Box(
-                low=np.array([0.0]),
-                high=np.array([1.0]),
+                low=np.array([0.0, 0.0]),
+                high=np.array([1.0, np.pi]),
                 dtype=np.float32,
             )
         else:
-            # Full: [thrust_x, thrust_y, thrust_z, compute_throttle]
+            # Full: [thrust_r, thrust_t, thrust_n, compute_throttle, attitude_theta]
             self.action_space = spaces.Box(
-                low=np.array([-1, -1, -1, 0]),
-                high=np.array([1, 1, 1, 1]),
+                low=np.array([-0.1, -0.1, -0.1, 0.0, 0.0]),
+                high=np.array([0.1, 0.1, 0.1, 1.0, np.pi]),
                 dtype=np.float32,
             )
 
         # --- OBSERVATION SPACE ---
         if self.phase == "thermal_only":
-            # [pos(3), vel(3), temp, temp_rate, is_lit, demand, avg_compute, temp_trend]
+            # [pos(3), vel(3), temp, temp_rate, is_lit, demand, avg_compute, temp_trend, theta]
             self.observation_space = spaces.Box(
-                low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32
             )
         else:
-            # Full: [pos(3), vel(3), temp, temp_rate, is_lit, dist, demand, fuel, avg_compute, temp_trend]
+            # Full: [pos(3), vel(3), temp, temp_rate, is_lit, dist, demand, fuel, avg_compute, temp_trend, theta]
             self.observation_space = spaces.Box(
-                low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(15,), dtype=np.float32
             )
 
         # --- CATALOG LOADER ---
@@ -78,9 +78,11 @@ class SatEnv(gym.Env):
                 self.debris_satellites = load.tle_file("iridium-33-debris.txt")
                 self.active_satellites = load.tle_file("active.txt")
                 self.full_catalog = self.debris_satellites + self.active_satellites
+                # Optimization for RL: Truncate to 100 objects to maintain fast step times (PDD Week 1)
+                self.full_catalog = self.full_catalog[:100]
             except Exception:
                 print("Warning: Full catalog not found. Using subset.")
-                self.full_catalog = load.tle_file("iridium-33-debris.txt")
+                self.full_catalog = load.tle_file("iridium-33-debris.txt")[:100]
             print(f"Tracking {len(self.full_catalog)} objects.")
         else:
             self.full_catalog = []
@@ -107,6 +109,7 @@ class SatEnv(gym.Env):
         self.current_temp = random.uniform(345.0, 355.0)
         self.temp_rate = 0.0
         self.prev_compute_throttle = 0.0
+        self.current_theta = 0.0
 
         # Clear rolling histories
         self.temp_history.clear()
@@ -164,10 +167,11 @@ class SatEnv(gym.Env):
             thrust_mag = 0.0
             fuel_cost = 0.0
             raw_throttle = float(np.clip(action[0], 0.0, 1.0))
+            self.current_theta = float(np.clip(action[1], 0.0, np.pi)) if len(action) > 1 else 0.0
         else:
-            thrust_vec = np.array(action[0:3], dtype=np.float64)
+            thrust_vec = np.array(action[0:3], dtype=np.float64) # [-0.1, 0.1]
             thrust_mag = float(np.linalg.norm(thrust_vec))
-            fuel_cost = thrust_mag * 0.05
+            fuel_cost = thrust_mag # 1 unit deltaV = 1 unit fuel
             if self.fuel > 0.0:
                 self.fuel = max(0.0, self.fuel - fuel_cost)
             else:
@@ -175,6 +179,7 @@ class SatEnv(gym.Env):
                 thrust_mag = 0.0
                 fuel_cost = 0.0
             raw_throttle = float(np.clip(action[3], 0.0, 1.0))
+            self.current_theta = float(np.clip(action[4], 0.0, np.pi))
 
         # EMA smoothing: structurally enforces smooth compute output.
         # The agent can't make sudden jumps — max change per step ≈ alpha * gap.
@@ -193,7 +198,10 @@ class SatEnv(gym.Env):
         )
 
         is_lit = self.sat.at(self.t_current).is_sunlit(self.eph)
-        q_solar = (AREA_CROSS * SOLAR_CONSTANT * ALPHA) if is_lit else 0.0
+        # Solar aspect angle factor: cos(theta). We use abs() so both flat sides absorb equally.
+        # theta = 0 -> full broadside. theta = pi/2 -> edge on.
+        theta_factor = abs(np.cos(self.current_theta))
+        q_solar = (AREA_CROSS * SOLAR_CONSTANT * ALPHA * theta_factor) if is_lit else 0.0
         q_earth = 230.0 * 0.2 * EPSILON * AREA_RAD
         q_thrust = thrust_mag * Q_THRUST_PEAK
         q_gen = Q_BUS_BASE + (compute_throttle * Q_GPU_PEAK) + q_thrust
@@ -232,76 +240,56 @@ class SatEnv(gym.Env):
             self.min_dist_km = min_dist_km
 
         # =============================================
-        #     REWARD v8 — THERMAL-GATED REVENUE
+        #     PDD MULTI-OBJECTIVE REWARD
         # =============================================
-        # Compute revenue is GATED by thermal efficiency.
-        # Running hot reduces the profitability of compute.
-        # This makes steady-state at equilibrium throttle (~60%)
-        # MORE profitable than bang-bang cycling.
-        # Smoothness enforced structurally via EMA (not reward).
-        reward = 0.0
         terminated = False
-
-        # ------ 1. THERMAL EFFICIENCY (0→1 as T goes from T_SOFT_LIMIT→T_TARGET) ------
-        thermal_headroom = T_SOFT_LIMIT - T_TARGET  # 8K
-        if self.current_temp <= T_TARGET:
-            thermal_efficiency = 1.0
-        elif self.current_temp >= T_SOFT_LIMIT:
-            thermal_efficiency = 0.0
-        else:
-            thermal_efficiency = 1.0 - ((self.current_temp - T_TARGET) / thermal_headroom)
-
-        # ------ 2. COMPUTE REVENUE (gated by thermal efficiency) ------
-        # At T_TARGET (350K): revenue = 5.0 * throttle (full value)
-        # At T_SOFT_LIMIT (358K): revenue = 0.0 (no value from compute)
-        # This makes running hot DIRECTLY unprofitable.
-        gated_compute = compute_throttle * thermal_efficiency
-        reward += 5.0 * gated_compute
-
-        # Demand matching (also gated — can't earn demand bonus when hot)
-        if compute_throttle >= self.global_demand:
-            reward += 0.5 * thermal_efficiency
-        else:
-            demand_gap = max(0.0, self.global_demand - compute_throttle)
-            reward -= 0.5 * demand_gap
-
-        # ------ 3. TEMPERATURE COST (continuous, quadratic) ------
-        temp_excess = max(0.0, self.current_temp - T_TARGET)
-        normalized_excess = temp_excess / thermal_headroom
-        reward -= 4.0 * (normalized_excess ** 2.0)
-
-        # ------ 4. HARD LIMITS ------
-        if self.current_temp >= T_HARD_LIMIT:
-            reward -= 30.0
-            terminated = True
-        elif self.current_temp >= T_SOFT_LIMIT:
-            stress = self.current_temp - T_SOFT_LIMIT
-            reward -= 5.0 + 3.0 * stress
-
-        # ------ 5. DEBRIS (full phase only) ------
+        
+        # 1. Collision Penalty (R_collision)
+        # PDD: <1km: 1e-3, <5km: 1e-4, <10km: 1e-5
+        r_collision = 0.0
         if self.phase == "full":
-            if self.min_dist_km < 5.0:
-                reward -= 30.0
+            if self.min_dist_km < 1.0:
+                r_collision = -1e-3
                 terminated = True
-            elif self.min_dist_km < 20.0:
-                reward -= 8.0
-            elif self.min_dist_km < 50.0:
-                reward -= 3.0
-            elif self.min_dist_km < 100.0:
-                reward -= 1.0
-
-        # ------ 6. FUEL (full phase only) ------
-        if self.phase == "full":
-            reward -= fuel_cost * 0.02
-            if self.fuel <= 0.0:
-                reward -= 0.1
-
-        # ------ 7. SURVIVAL ------
+            elif self.min_dist_km < 5.0:
+                r_collision = -1e-4
+            elif self.min_dist_km < 10.0:
+                r_collision = -1e-5
+                
+        # 2. Thermal Management (R_thermal)
+        # Smooth gaussian around T_opt (313 K / 40 C) with sigma 20
+        T_opt = 313.0
+        r_thermal = float(np.exp(- ((self.current_temp - T_opt)**2) / (2 * 20.0**2)))
+        
+        # 3. Compute Uptime (R_compute)
+        # Revenue only granted if below thermal hard limit.
+        if self.current_temp < T_HARD_LIMIT:
+            r_compute = compute_throttle
+        else:
+            r_compute = 0.0
+            
+        # 4. Fuel Efficiency (R_fuel)
+        # Normalized by max potential delta V per step (~0.173)
+        r_fuel = thrust_mag / 0.173 if self.phase == "full" else 0.0
+        
+        # Compute Weighted Local Reward
+        # Fix for PDD logic: w_2 needs to be massive to outscale w_1=10
+        w_collision = 100000.0 # 100,000 * 1e-3 = 100.0 penalty
+        w_thermal = 5.0
+        w_compute = 8.0
+        w_fuel = 1.0
+        
+        reward = (w_collision * r_collision) + (w_thermal * r_thermal) + (w_compute * r_compute) - (w_fuel * r_fuel)
+        
+        # Hard limits & Survival
+        if self.current_temp >= T_HARD_LIMIT:
+            reward -= 50.0 # Catastrophic failure
+            terminated = True
+            
         if not terminated:
-            reward += 0.1
-
-        # Clip
-        reward = float(np.clip(reward, -15.0, 8.0))
+            reward += 0.1 # Small survival baseline
+            
+        reward = float(np.clip(reward, -100.0, 15.0))
         self.prev_compute_throttle = compute_throttle
 
         # Truncate
@@ -336,17 +324,20 @@ class SatEnv(gym.Env):
             if len(self.temp_history) >= 20 else 0.0
         temp_trend_norm = float(np.clip(temp_trend / 10.0, -1.0, 1.0))
 
+        # Normalize theta for obs
+        theta_norm = self.current_theta / np.pi
+
         if self.phase == "thermal_only":
             obs = np.concatenate(
                 (pos, vel, [temp_norm, temp_rate_norm, is_lit,
-                            self.global_demand, avg_compute, temp_trend_norm])
+                            self.global_demand, avg_compute, temp_trend_norm, theta_norm])
             )
         else:
             dist_norm = min(self.min_dist_km, 1000.0) / 1000.0
             fuel_norm = self.fuel / self.MAX_FUEL
             obs = np.concatenate(
                 (pos, vel, [temp_norm, temp_rate_norm, is_lit, dist_norm,
-                            self.global_demand, fuel_norm, avg_compute, temp_trend_norm])
+                            self.global_demand, fuel_norm, avg_compute, temp_trend_norm, theta_norm])
             )
 
         return obs.astype(np.float32)

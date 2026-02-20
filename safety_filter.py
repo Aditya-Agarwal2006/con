@@ -18,14 +18,14 @@ class ThermalSafetyWrapper(gym.Wrapper):
         self.max_temp = max_temp
 
     def step(self, action):
-        # Action is expected to be [n_sats] continuous logits
+        # Action is expected to be [n_sats * 5] continuous values
+        # Index 3 of each 5D chunk is the compute_throttle
         safe_action = np.copy(action)
         
-        # We assume the underlying env has a 'sats' attribute (ConstellationEnv)
-        # In a real deployed system, this would query telemetry.
         for i, sat in enumerate(self.env.unwrapped.sats):
             if sat.current_temp >= self.max_temp:
-                # Force logit to -100.0 so Softmax weight -> 0
-                safe_action[i] = -100.0
+                # Force throttle to 0.0
+                safe_action[i * 5 + 3] = 0.0
+                
                 
         return self.env.step(safe_action)
