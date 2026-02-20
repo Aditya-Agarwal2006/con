@@ -1,9 +1,10 @@
 AAS/AIAA Conference Metrics Summary
 ========================================
-                 Total Reward         Avg Throughput/Step       Thermal Violations        Avg Coverage/Step      Steps Completed
-                         mean     std                mean   std               mean    std              mean  std            mean
-Policy                                                                                                                          
-Random                4237.76   29.55               11.51  0.03             1540.0   0.00              0.37  0.0          500.00
-Rule-Based            2823.21  129.10               18.82  0.07              800.0  34.12              0.38  0.0          258.33
-Thermal-Naive RL      2639.79   11.20                1.17  0.00                0.0   0.00              0.37  0.0          500.00
-Walker Standard       3068.25  215.95               22.24  0.12              803.0  52.51              0.38  0.0          259.33
+                             Total Reward         Avg Throughput/Step       Thermal Violations         Avg Coverage/Step      Steps Completed
+                                     mean     std                mean   std               mean     std              mean  std            mean
+Policy                                                                                                                                       
+Random                            4237.76   29.55               11.51  0.03            1540.00    0.00              0.37  0.0          500.00
+Rule-Based                        2823.21  129.10               18.82  0.07             800.00   34.12              0.38  0.0          258.33
+Thermal-Aware RL (God Agent)      4412.00  642.96               22.43  0.17            3515.33  856.02              0.37  0.0          396.00
+Thermal-Naive RL                  2639.79   11.20                1.17  0.00               0.00    0.00              0.37  0.0          500.00
+Walker Standard                   3068.25  215.95               22.24  0.12             803.00   52.51              0.38  0.0          259.33
