@@ -6,6 +6,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecMonitor
 from constellation_env import ConstellationEnv
+from safety_filter import ThermalSafetyWrapper
 
 class ConstellationLogCallback(BaseCallback):
     """
@@ -42,7 +43,7 @@ def main():
     
     # Create Environment
     # We use a lambda to ensure clean creation
-    env = DummyVecEnv([lambda: ConstellationEnv()])
+    env = DummyVecEnv([lambda: ThermalSafetyWrapper(ConstellationEnv())])
     
     # Normalize observations and rewards
     # Normalizing Obs is crucial for PPO

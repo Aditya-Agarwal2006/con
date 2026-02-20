@@ -36,6 +36,13 @@ Scaling up, I implemented a centralized RL dispatcher to manage a 24-satellite *
 The agent learns orbital thermal dynamics without explicit prompting: it dynamically routes heavy workloads to satellites currently passing through Earth's eclipse (where radiative cooling is maximum) allowing sun-baked satellites to cool down.
 
 <div align="center">
+  <img src="orbit_dispatch.gif" alt="Constellation Dispatch Animation" width="800"/>
+  <p><i><b>Active Constellation Dispatch:</b> The RL Agent routes heavy compute load (size of circles) to satellites operating in optimal thermal bands, actively managing the fleet's average temperature.</i></p>
+</div>
+
+<br>
+
+<div align="center">
   <img src="constellation_heatmap.png" alt="Constellation Heatmap" width="800"/>
   <p><i>Fleet-wide load balancing: The dispatcher routes high throttle (middle) to manage fleet temperatures (top).</i></p>
 </div>
