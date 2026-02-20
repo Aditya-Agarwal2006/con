@@ -19,7 +19,7 @@ class ConstellationEnv(gym.Env):
     Action:
       - Load weights (24): Softmax is applied to these to distribute demand.
     """
-    def __init__(self):
+    def __init__(self, naive_thermal=False):
         super(ConstellationEnv, self).__init__()
         
         self.n_sats = 24
@@ -32,7 +32,7 @@ class ConstellationEnv(gym.Env):
         print("Initializing 24 Satellite Environments (Phase=full)...")
         self.sats = []
         for i in range(self.n_sats):
-            env = SatEnv(phase="full", tle_input=self.tles[i])
+            env = SatEnv(phase="full", tle_input=self.tles[i], naive_thermal=naive_thermal)
             self.sats.append(env)
             
         # 3. 120D Action Space (24 sats * 5 actions) 

@@ -36,10 +36,11 @@ class SatEnv(gym.Env):
       - "full":         complete env with debris, fuel, and thrust
     """
 
-    def __init__(self, phase="thermal_only", tle_input=None):
+    def __init__(self, phase="thermal_only", tle_input=None, naive_thermal=False):
         super(SatEnv, self).__init__()
         self.phase = phase
         self.tle_input = tle_input
+        self.naive_thermal = naive_thermal
         self.MAX_FUEL = 50.0
         self.fuel = self.MAX_FUEL
 
@@ -263,7 +264,7 @@ class SatEnv(gym.Env):
         
         # 3. Compute Uptime (R_compute)
         # Revenue only granted if below thermal hard limit.
-        if self.current_temp < T_HARD_LIMIT:
+        if self.current_temp < T_HARD_LIMIT or self.naive_thermal:
             r_compute = compute_throttle
         else:
             r_compute = 0.0
@@ -273,9 +274,8 @@ class SatEnv(gym.Env):
         r_fuel = thrust_mag / 0.173 if self.phase == "full" else 0.0
         
         # Compute Weighted Local Reward
-        # Fix for PDD logic: w_2 needs to be massive to outscale w_1=10
         w_collision = 100000.0 # 100,000 * 1e-3 = 100.0 penalty
-        w_thermal = 5.0
+        w_thermal = 0.0 if self.naive_thermal else 5.0
         w_compute = 8.0
         w_fuel = 1.0
         
